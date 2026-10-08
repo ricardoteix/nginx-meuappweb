@@ -1,0 +1,9 @@
+# Certificados e chaves gerados localmente — NUNCA versionar
+nginx/certs/*
+!nginx/certs/.gitkeep
+
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store

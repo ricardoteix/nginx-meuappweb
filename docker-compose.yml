@@ -1,0 +1,120 @@
+# =============================================================================
+#  MeuApp Eventos — exemplo prático do e-book "Guia Definitivo NGINX"
+#
+#  Apenas o NGINX (edge) publica portas no host (80 e 443).
+#  Os serviços ficam isolados na rede interna e só são alcançados via proxy:
+#
+#    https://meuappweb.com.br        -> web   (container :3000)
+#    https://api.meuappweb.com.br    -> api   (container :8080)
+#    https://admin.meuappweb.com.br  -> admin (container :3001)
+# =============================================================================
+name: meuappweb
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1) Gera (uma única vez) a CA local, o certificado TLS e o dhparam.
+  #    Se os arquivos já existirem em ./nginx/certs, nada é refeito.
+  # ---------------------------------------------------------------------------
+  certgen:
+    image: alpine:3.20
+    command: ["sh", "/scripts/gen-certs.sh", "/certs"]
+    volumes:
+      - ./nginx/certs:/certs
+      - ./scripts/gen-certs.sh:/scripts/gen-certs.sh:ro
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # 2) Edge NGINX: TLS, roteamento por domínio, headers de segurança,
+  #    rate limiting, gzip e proxy reverso.
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      certgen:
+        condition: service_completed_successfully
+      web:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nginx", "-t", "-q"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks: [edge]
+
+  # ---------------------------------------------------------------------------
+  # 3) Frontend público (SPA em HTML/CSS/JS puro, já "buildado")
+  # ---------------------------------------------------------------------------
+  web:
+    build: ./web
+    expose: ["3000"]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks: [edge]
+
+  # ---------------------------------------------------------------------------
+  # 4) Frontend administrativo (SPA)
+  # ---------------------------------------------------------------------------
+  admin:
+    build: ./admin
+    expose: ["3001"]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3001/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks: [edge]
+
+  # ---------------------------------------------------------------------------
+  # 5) Backend FastAPI com dados mockados (sem banco).
+  #    Sem container_name para permitir: docker compose up -d --scale api=3
+  # ---------------------------------------------------------------------------
+  api:
+    build: ./api
+    expose: ["8080"]
+    environment:
+      ADMIN_USER: admin
+      ADMIN_PASSWORD: admin123
+      CORS_ORIGINS: https://meuappweb.com.br,https://admin.meuappweb.com.br
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks: [edge]
+
+networks:
+  edge:
+    driver: bridge
